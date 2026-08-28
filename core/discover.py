@@ -25,11 +25,108 @@ def get_headers():
         "Accept-Language": "en-US,en;q=0.9",
     }
 
+def discover_common_crawl(domain: str, max_indexes: int = 3) -> Set[str]:
+    """
+    Queries the official Common Crawl CDX Server API across recent global web crawl collections.
+    """
+    discovered = set()
+    try:
+        collinfo_url = "https://index.commoncrawl.org/collinfo.json"
+        resp = requests.get(collinfo_url, headers=get_headers(), timeout=6)
+        if resp.status_code == 200:
+            index_list = resp.json()[:max_indexes]
+            for idx in index_list:
+                cdx_api = idx.get("cdx-api")
+                if not cdx_api:
+                    continue
+                try:
+                    # Query domain captures and cross-linked references
+                    query_url = f"{cdx_api}?url=*.{domain}&matchType=domain&output=json&limit=40"
+                    res = requests.get(query_url, headers=get_headers(), timeout=DEFAULT_TIMEOUT)
+                    if res.status_code == 200:
+                        for line in res.text.splitlines():
+                            try:
+                                record = json.loads(line)
+                                u = record.get("url")
+                                if u and u.startswith(("http://", "https://")):
+                                    discovered.add(u)
+                            except Exception:
+                                continue
+                except Exception:
+                    continue
+    except Exception as e:
+        print(f"Common Crawl CDX query error: {e}")
+        
+    return discovered
+
+def discover_wayback_cdx(domain: str) -> Set[str]:
+    """
+    Queries Wayback Machine CDX API with wildcard matching for historical referring pages.
+    """
+    discovered = set()
+    try:
+        url = f"https://web.archive.org/cdx/search/cdx?url=*{domain}*&output=json&fl=original,timestamp&collapse=urlkey&limit=80"
+        resp = requests.get(url, headers=get_headers(), timeout=DEFAULT_TIMEOUT)
+        if resp.status_code == 200:
+            data = resp.json()
+            if len(data) > 1:
+                for row in data[1:]:
+                    if row and len(row) > 0:
+                        orig = row[0]
+                        if orig.startswith(("http://", "https://")) and not is_internal_link(domain, orig):
+                            discovered.add(orig)
+    except Exception:
+        pass
+    return discovered
+
+def discover_alienvault(domain: str) -> Set[str]:
+    """
+    Queries AlienVault OTX Passive URL intelligence endpoint.
+    """
+    discovered = set()
+    try:
+        url = f"https://otx.alienvault.com/api/v1/indicators/domain/{domain}/url_list?limit=60&page=1"
+        resp = requests.get(url, headers=get_headers(), timeout=DEFAULT_TIMEOUT)
+        if resp.status_code == 200:
+            data = resp.json()
+            for item in data.get("url_list", []):
+                page_url = item.get("url")
+                if page_url and page_url.startswith(("http://", "https://")):
+                    if not is_internal_link(domain, page_url):
+                        discovered.add(page_url)
+    except Exception:
+        pass
+    return discovered
+
+def discover_duckduckgo_competitor_footprints(domain: str) -> Set[str]:
+    """
+    Scrapes DuckDuckGo Lite for competitor directories, supplier pages, and citations.
+    """
+    discovered = set()
+    queries = [
+        f'"{domain}" -site:{domain}',
+        f'"{domain}" "directory" OR "suppliers" OR "manufacturers" -site:{domain}',
+        f'"{domain}" "partner" OR "blog" OR "article" -site:{domain}'
+    ]
+    for q in queries:
+        try:
+            url = "https://lite.duckduckgo.com/lite/"
+            resp = requests.post(url, data={"q": q}, headers=get_headers(), timeout=DEFAULT_TIMEOUT)
+            if resp.status_code == 200:
+                urls = re.findall(r'class=[\"\']result-link[\"\']\s+href=[\"\'](https?://[^\"\']+)[\"\']', resp.text)
+                if not urls:
+                    urls = re.findall(r'href=[\"\'](https?://[^\"\'\s>]+)[\"\']', resp.text)
+                for u in urls:
+                    if not is_internal_link(domain, u) and "duckduckgo.com" not in u:
+                        discovered.add(u)
+        except Exception:
+            continue
+    return discovered
+
 def discover_competitor_backlinks_gemini(domain: str, gemini_api_key: str = None) -> List[Dict[str, str]]:
     """
-    Uses Gemini AI web intelligence to find where a competitor built backlinks (guest posts,
-    business directories, forums, resource pages, review sites, partner citations),
-    along with their anchor text and target landing page.
+    Uses Gemini AI web intelligence to extract realistic external backlink sources,
+    anchor texts, target landing pages, and source types.
     """
     results = []
     if not gemini_api_key:
@@ -43,27 +140,27 @@ def discover_competitor_backlinks_gemini(domain: str, gemini_api_key: str = None
         
         prompt = f"""
 You are an expert SEO Competitor Intelligence Specialist.
-Find real external web pages where the competitor domain '{domain}' has acquired backlinks or citations.
+Find real external web pages where the domain '{domain}' has acquired backlinks, directory listings, or citations.
 Look for:
-1. Niche & Trade Directories (e.g. IndiaMART, JustDial, Clutch, Crunchbase, etc.)
-2. Industry Blogs, Guest Posts & News Articles
-3. Forum / Community & Resource Page Mentions
+1. Trade & B2B Directories (e.g. IndiaMART, TradeIndia, ExportersIndia, Clutch, JustDial)
+2. Industry Blogs, News & Guest Articles
+3. Forums & Community Resource Mentions
 4. Partner & Vendor listings
 
 Return ONLY a JSON array of objects with the exact structure:
 [
   {{
-    "referring_url": "https://example.com/industry-suppliers",
+    "referring_url": "https://example.com/industry-directory",
     "referring_domain": "example.com",
-    "target_landing_url": "https://{domain}/product-page",
-    "anchor_text": "Valve Manufacturers in India",
+    "target_landing_url": "https://{domain}/",
+    "anchor_text": "Valve Manufacturers",
     "source_type": "Directory / Guest Post / News / Review"
   }}
 ]
 
 Important:
 - Do not include internal links from {domain}.
-- Provide at least 20-35 realistic external referring sources where '{domain}' is linked.
+- Provide at least 20-35 valid external referring sources where '{domain}' is cited.
 """
         response_text = None
         for m in CANDIDATE_MODELS:
@@ -104,84 +201,30 @@ Important:
         
     return results
 
-def discover_wayback_cdx(domain: str) -> Set[str]:
-    discovered = set()
-    try:
-        url = f"https://web.archive.org/cdx/search/cdx?url=*{domain}*&output=json&limit=60"
-        resp = requests.get(url, headers=get_headers(), timeout=DEFAULT_TIMEOUT)
-        if resp.status_code == 200:
-            data = resp.json()
-            if len(data) > 1:
-                for row in data[1:]:
-                    if len(row) > 2:
-                        orig = row[2]
-                        if orig.startswith(("http://", "https://")) and not is_internal_link(domain, orig):
-                            discovered.add(orig)
-    except Exception:
-        pass
-    return discovered
-
-def discover_alienvault(domain: str) -> Set[str]:
-    discovered = set()
-    try:
-        url = f"https://otx.alienvault.com/api/v1/indicators/domain/{domain}/url_list?limit=50&page=1"
-        resp = requests.get(url, headers=get_headers(), timeout=DEFAULT_TIMEOUT)
-        if resp.status_code == 200:
-            data = resp.json()
-            for item in data.get("url_list", []):
-                page_url = item.get("url")
-                if page_url and page_url.startswith(("http://", "https://")):
-                    if not is_internal_link(domain, page_url):
-                        discovered.add(page_url)
-    except Exception:
-        pass
-    return discovered
-
-def discover_duckduckgo_competitor_footprints(domain: str) -> Set[str]:
-    discovered = set()
-    queries = [
-        f'"{domain}" -site:{domain}',
-        f'"{domain}" "directory" OR "suppliers" OR "manufacturers" OR "review" -site:{domain}',
-        f'"{domain}" "partner" OR "blog" OR "article" -site:{domain}'
-    ]
-    for q in queries:
-        try:
-            url = "https://lite.duckduckgo.com/lite/"
-            resp = requests.post(url, data={"q": q}, headers=get_headers(), timeout=DEFAULT_TIMEOUT)
-            if resp.status_code == 200:
-                urls = re.findall(r'class=[\"\']result-link[\"\']\s+href=[\"\'](https?://[^\"\']+)[\"\']', resp.text)
-                if not urls:
-                    urls = re.findall(r'href=[\"\'](https?://[^\"\'\s>]+)[\"\']', resp.text)
-                for u in urls:
-                    if not is_internal_link(domain, u) and "duckduckgo.com" not in u:
-                        discovered.add(u)
-        except Exception:
-            continue
-    return discovered
-
 def discover_all_candidate_referrers(domain: str, gemini_api_key: str = None, progress_callback=None) -> Dict[str, Any]:
     clean_dom = clean_domain(domain)
     all_urls: Set[str] = set()
     competitor_ai_links: List[Dict[str, Any]] = []
     
     if progress_callback:
-        progress_callback("🔎 Scanning Historical Web Archives & Passive Repositories (Wayback CDX & AlienVault)...")
+        progress_callback("🌐 Step 1/3: Querying official Common Crawl CDX Server API...")
+    cc_links = discover_common_crawl(clean_dom)
+    all_urls.update(cc_links)
     
+    if progress_callback:
+        progress_callback(f"🏛️ Step 2/3: Scanning Historical Web Archives & AlienVault... ({len(all_urls)} candidates)")
     wb_links = discover_wayback_cdx(clean_dom)
     all_urls.update(wb_links)
     
     av_links = discover_alienvault(clean_dom)
     all_urls.update(av_links)
     
-    if progress_callback:
-        progress_callback(f"🌐 Searching Competitor Footprints & Directories... ({len(all_urls)} candidates found)")
-    
     ddg_links = discover_duckduckgo_competitor_footprints(clean_dom)
     all_urls.update(ddg_links)
     
     if gemini_api_key:
         if progress_callback:
-            progress_callback(f"🎯 Uncovering Competitor Backlinks, Anchor Texts & Target Pages with Gemini AI...")
+            progress_callback(f"🧠 Step 3/3: Uncovering Competitor Anchors & Landing Pages with Gemini AI...")
         competitor_ai_links = discover_competitor_backlinks_gemini(clean_dom, gemini_api_key)
         for item in competitor_ai_links:
             all_urls.add(item["Referring URL"])

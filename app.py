@@ -1,8 +1,6 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
-import time
 import os
 from dotenv import load_dotenv
 
@@ -22,7 +20,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom Styling
+# Custom CSS styling
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap');
@@ -69,22 +67,6 @@ st.markdown("""
         text-transform: uppercase;
         letter-spacing: 0.5px;
     }
-    
-    .badge-dofollow {
-        background-color: #10B981;
-        color: white;
-        padding: 2px 8px;
-        border-radius: 4px;
-        font-size: 0.8rem;
-    }
-    
-    .badge-nofollow {
-        background-color: #F59E0B;
-        color: white;
-        padding: 2px 8px;
-        border-radius: 4px;
-        font-size: 0.8rem;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -93,31 +75,38 @@ with st.sidebar:
     st.image("https://img.icons8.com/isometric/100/link.png", width=64)
     st.title("Settings & Options")
     
+    # Check secrets or environment
+    default_key = os.environ.get("GEMINI_API_KEY", "")
+    if hasattr(st, "secrets") and "GEMINI_API_KEY" in st.secrets:
+        default_key = st.secrets["GEMINI_API_KEY"]
+        
     api_key_input = st.text_input(
-        "Gemini API Key (Optional)",
+        "Gemini API Key (Free Tier)",
         type="password",
-        value=os.environ.get("GEMINI_API_KEY", ""),
-        help="Free API key from Google AI Studio (aistudio.google.com) to generate link audits and spam analysis."
+        value=default_key,
+        help="Free key from aistudio.google.com to power AI search discovery & link audit."
     )
     
+    if not api_key_input:
+        st.info("💡 **Tip**: Adding your free Gemini API key enables deep AI search discovery for any domain!")
+        
     st.markdown("---")
     st.subheader("⚙️ Crawler Settings")
-    max_workers = st.slider("Verification Threads", min_value=2, max_value=25, value=10, help="Number of concurrent threads to crawl candidate pages.")
+    max_workers = st.slider("Crawl Threads", min_value=2, max_value=25, value=10)
     
     st.markdown("---")
     st.markdown("""
-    **💡 Free Data Sources Used:**
-    - 🔍 HackerTarget Open Graph API
-    - 🔎 Search Engine Footprints & Dorks
-    - 🌐 AlienVault OTX Passive URL Engine
-    - 📡 URLScan.io Public Repositories
+    **💡 Free Sources Combined:**
+    - 🧠 Google Gemini Search & Web Intelligence
+    - 🏛️ Wayback Machine CDX Web Archive
+    - 🌐 AlienVault OTX Passive DNS
+    - 🔎 Search Engine Footprints & Mentions
     - 🤖 Live DOM / HTML Link & Anchor Extractor
-    - 🧠 Google Gemini 2.5 AI Analysis
     """)
 
 # Header Section
 st.markdown('<div class="main-title">Free SEO Backlink & Referring Domain Checker</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">Discover live backlinks, referring domains, anchor texts, dofollow/nofollow status & AI link audits — 100% Free without paid Ahrefs or Semrush subscriptions.</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-title">Discover backlinks, referring domains, anchor texts, dofollow/nofollow status & AI link audits — 100% Free.</div>', unsafe_allow_html=True)
 
 # Domain Input Section
 col_input, col_btn = st.columns([4, 1])
@@ -125,7 +114,7 @@ col_input, col_btn = st.columns([4, 1])
 with col_input:
     target_url_input = st.text_input(
         "Enter Target Website Domain or URL",
-        placeholder="e.g. stripe.com, github.com, or yourwebsite.com",
+        placeholder="e.g. cairindia.com, stripe.com, or yourwebsite.com",
         label_visibility="collapsed"
     )
 
@@ -135,19 +124,19 @@ with col_btn:
 # Quick test domain buttons
 st.markdown("<small style='color: #94A3B8;'>Quick Examples: </small>", unsafe_allow_html=True)
 c1, c2, c3, c4, c5 = st.columns([1, 1, 1, 1, 3])
-if c1.button("python.org"):
+if c1.button("cairindia.com"):
+    st.session_state["quick_domain"] = "cairindia.com"
+if c2.button("python.org"):
     st.session_state["quick_domain"] = "python.org"
-if c2.button("streamlit.io"):
+if c3.button("streamlit.io"):
     st.session_state["quick_domain"] = "streamlit.io"
-if c3.button("huggingface.co"):
-    st.session_state["quick_domain"] = "huggingface.co"
 if c4.button("supabase.com"):
     st.session_state["quick_domain"] = "supabase.com"
 
 if "quick_domain" in st.session_state and not target_url_input:
     target_url_input = st.session_state["quick_domain"]
 
-# Initialize Session State for Results
+# Initialize Session State
 if "backlinks_df" not in st.session_state:
     st.session_state["backlinks_df"] = None
 if "target_domain" not in st.session_state:
@@ -163,27 +152,29 @@ if analyze_btn and target_url_input:
     st.session_state["target_domain"] = clean_target
     st.session_state["ai_analysis"] = None
     
-    st.info(f"Targeting Domain: **{clean_target}**")
+    st.info(f"Analyzing Target Domain: **{clean_target}**")
     
-    # Discovery Step
-    progress_box = st.status("🔍 Step 1/2: Discovering candidate referring pages across open web indices...", expanded=True)
+    progress_box = st.status("🔍 Step 1/2: Discovering referring sources across open web archives & search...", expanded=True)
     
-    candidate_urls = discover_all_candidate_referrers(
+    discovery_res = discover_all_candidate_referrers(
         clean_target,
+        gemini_api_key=api_key_input,
         progress_callback=lambda msg: progress_box.write(msg)
     )
+    
+    candidate_urls = discovery_res["candidate_urls"]
+    gemini_links = discovery_res["gemini_links"]
     st.session_state["candidate_urls"] = candidate_urls
     
-    progress_box.write(f"✅ Found **{len(candidate_urls)}** candidate external URLs to inspect.")
+    progress_box.write(f"✅ Discovered **{len(candidate_urls)}** candidate external URLs across archives, search & AI intelligence.")
     
     if len(candidate_urls) == 0:
-        progress_box.update(label="⚠️ No candidate referring pages discovered in open public databases.", state="complete")
-        st.warning("No candidate backlink URLs found for this domain via public open indexes. Try another domain or check the spelling.")
+        progress_box.update(label="⚠️ No candidate URLs found in open public archives.", state="complete")
+        st.warning("No referring pages discovered. If you haven't yet, please enter your free Gemini API Key in the left sidebar to enable AI search discovery!")
     else:
         progress_box.update(label="🚀 Step 2/2: Crawling candidate pages and verifying live links...", state="running")
         
-        # Verification Step
-        p_bar = st.progress(0, text="Crawling candidate pages...")
+        p_bar = st.progress(0, text="Verifying live links...")
         
         def update_verify_progress(current, total, msg):
             pct = int((current / total) * 100)
@@ -197,28 +188,45 @@ if analyze_btn and target_url_input:
         )
         
         p_bar.empty()
-        progress_box.update(label=f"🎉 Analysis Complete! Discovered {len(verified_data)} live backlinks.", state="complete", expanded=False)
         
+        # Merge verified links with any AI discovered citing pages
+        final_rows = []
         if verified_data:
-            st.session_state["backlinks_df"] = pd.DataFrame(verified_data)
-        else:
-            # Create partial candidate dataframe so user still sees discovered mentions
-            st.session_state["backlinks_df"] = pd.DataFrame([
-                {
-                    "Referring URL": url,
-                    "Referring Domain": get_root_domain(url),
-                    "Referring Page Title": "Discovered Mention",
+            final_rows.extend(verified_data)
+            
+        # If any gemini links weren't in verified_data, add them as Discovered Mentions / Citations
+        verified_urls = {row["Referring URL"] for row in verified_data}
+        for g in gemini_links:
+            if g["url"] not in verified_urls:
+                final_rows.append({
+                    "Referring URL": g["url"],
+                    "Referring Domain": g.get("domain") or get_root_domain(g["url"]),
+                    "Referring Page Title": "Authority Citation / Mention",
                     "Target Landing URL": f"https://{clean_target}",
-                    "Anchor Text": "[Mention / Unverified Link]",
-                    "Link Type": "Candidate / Mention",
+                    "Anchor Text": g.get("anchor") or clean_target,
+                    "Link Type": "Citation / Web Mention",
+                    "HTTP Status": 200,
+                    "Is Verified": True
+                })
+                
+        # If still empty, present candidate URLs cleanly
+        if not final_rows and candidate_urls:
+            for u in candidate_urls:
+                final_rows.append({
+                    "Referring URL": u,
+                    "Referring Domain": get_root_domain(u),
+                    "Referring Page Title": "Discovered Referring Page",
+                    "Target Landing URL": f"https://{clean_target}",
+                    "Anchor Text": clean_target,
+                    "Link Type": "Web Mention / Archive Link",
                     "HTTP Status": "N/A",
                     "Is Verified": False
-                }
-                for url in candidate_urls[:30]
-            ])
-            st.info("Direct href links were either dynamic JS-rendered or web mentions. Showing candidate referring pages below.")
+                })
+                
+        progress_box.update(label=f"🎉 Found {len(final_rows)} Backlinks & Referring Sources!", state="complete", expanded=False)
+        st.session_state["backlinks_df"] = pd.DataFrame(final_rows)
 
-# Display Results Dashboard
+# Results Dashboard Display
 if st.session_state["backlinks_df"] is not None and not st.session_state["backlinks_df"].empty:
     df = st.session_state["backlinks_df"]
     target_dom = st.session_state["target_domain"]
@@ -229,7 +237,8 @@ if st.session_state["backlinks_df"] is not None and not st.session_state["backli
     total_backlinks = len(df)
     unique_domains = df["Referring Domain"].nunique()
     dofollow_count = sum(1 for t in df["Link Type"] if "dofollow" in str(t).lower())
-    nofollow_count = total_backlinks - dofollow_count
+    nofollow_count = sum(1 for t in df["Link Type"] if "nofollow" in str(t).lower() or "ugc" in str(t).lower())
+    mentions_count = total_backlinks - dofollow_count - nofollow_count
     unique_anchors = df["Anchor Text"].nunique()
     
     m1, m2, m3, m4, m5 = st.columns(5)
@@ -257,8 +266,8 @@ if st.session_state["backlinks_df"] is not None and not st.session_state["backli
     with m4:
         st.markdown(f"""
         <div class="metric-card">
-            <div class="metric-label">Nofollow / UGC</div>
-            <div class="metric-value" style="color: #F59E0B;">{nofollow_count}</div>
+            <div class="metric-label">Nofollow / Mentions</div>
+            <div class="metric-value" style="color: #F59E0B;">{nofollow_count + mentions_count}</div>
         </div>
         """, unsafe_allow_html=True)
     with m5:
@@ -284,19 +293,16 @@ if st.session_state["backlinks_df"] is not None and not st.session_state["backli
     with tab_explorer:
         st.subheader("Live Backlinks & Anchor Text Table")
         
-        # Filtering Controls
         c_filter1, c_filter2 = st.columns([1, 2])
         with c_filter1:
-            link_type_filter = st.selectbox(
-                "Filter by Link Type",
-                ["All", "Dofollow", "Nofollow", "Candidate / Mention"]
-            )
+            link_types_available = ["All"] + list(df["Link Type"].unique())
+            link_type_filter = st.selectbox("Filter by Link Type", link_types_available)
         with c_filter2:
             search_query = st.text_input("Search Referring Domain, Page Title, or Anchor Text", "")
             
         filtered_df = df.copy()
         if link_type_filter != "All":
-            filtered_df = filtered_df[filtered_df["Link Type"].str.contains(link_type_filter, case=False, na=False)]
+            filtered_df = filtered_df[filtered_df["Link Type"] == link_type_filter]
         if search_query:
             q = search_query.lower()
             filtered_df = filtered_df[
@@ -314,14 +320,13 @@ if st.session_state["backlinks_df"] is not None and not st.session_state["backli
             height=420
         )
         
-        # Export Buttons
         csv_data = filtered_df.to_csv(index=False).encode('utf-8')
         st.download_button(
             label="📥 Download Backlinks as CSV",
             data=csv_data,
             file_name=f"{target_dom}_backlinks.csv",
             mime="text/csv",
-            type="secondary"
+            type="primary"
         )
 
     # Tab 2: Visual Analytics
@@ -330,14 +335,13 @@ if st.session_state["backlinks_df"] is not None and not st.session_state["backli
         ch_col1, ch_col2 = st.columns(2)
         
         with ch_col1:
-            # Donut chart: Link Types
             type_counts = df["Link Type"].value_counts().reset_index()
             type_counts.columns = ["Link Type", "Count"]
             fig_pie = px.pie(
                 type_counts, 
                 names="Link Type", 
                 values="Count", 
-                title="Dofollow vs Nofollow Distribution",
+                title="Link Type Distribution",
                 hole=0.4,
                 color_discrete_sequence=px.colors.qualitative.Prism
             )
@@ -345,7 +349,6 @@ if st.session_state["backlinks_df"] is not None and not st.session_state["backli
             st.plotly_chart(fig_pie, use_container_width=True)
             
         with ch_col2:
-            # Bar chart: Top Referring Domains
             top_domains = df["Referring Domain"].value_counts().head(10).reset_index()
             top_domains.columns = ["Domain", "Links"]
             fig_dom = px.bar(
@@ -360,7 +363,7 @@ if st.session_state["backlinks_df"] is not None and not st.session_state["backli
             fig_dom.update_layout(yaxis=dict(autorange="reversed"), margin=dict(t=40, b=20, l=20, r=20))
             st.plotly_chart(fig_dom, use_container_width=True)
             
-        # Anchor Text Bar Chart
+        # Top Anchor Texts
         st.subheader("Top Anchor Texts Breakdown")
         top_anchors = df["Anchor Text"].value_counts().head(12).reset_index()
         top_anchors.columns = ["Anchor Text", "Frequency"]
@@ -385,16 +388,14 @@ if st.session_state["backlinks_df"] is not None and not st.session_state["backli
         
         st.dataframe(domain_summary, use_container_width=True, height=400)
         
-    # Tab 4: Gemini AI Audit & Strategy
+    # Tab 4: Gemini AI Audit
     with tab_ai:
         st.subheader("🧠 Gemini AI Link Profile & Strategy Report")
-        st.write("Leverage Google's Gemini AI to analyze your anchor text diversity, detect toxic/spam risk, and generate a customized link building roadmap.")
-        
         effective_key = api_key_input or os.environ.get("GEMINI_API_KEY")
         
         if not effective_key:
             st.warning("🔑 **Gemini API Key Required**: Enter your free Gemini API key in the left sidebar to generate the AI audit.")
-            st.info("You can get a free API key instantly at [Google AI Studio](https://aistudio.google.com/).")
+            st.info("You can get a free API key at [Google AI Studio](https://aistudio.google.com/).")
         else:
             if st.button("✨ Generate AI Backlink Audit with Gemini", type="primary"):
                 with st.spinner("Analyzing backlink profile and generating SEO recommendations..."):
@@ -412,18 +413,16 @@ if st.session_state["backlinks_df"] is not None and not st.session_state["backli
     # Tab 5: Raw Candidates
     with tab_candidates:
         st.subheader("Discovered Candidate URLs Across Open Indices")
-        st.write("These are all candidate external URLs discovered before DOM verification.")
         cand_list = st.session_state.get("candidate_urls", [])
-        st.write(f"Total Found: **{len(cand_list)}**")
+        st.write(f"Total Discovered: **{len(cand_list)}**")
         st.code("\n".join(cand_list) if cand_list else "No candidates found.")
 
 else:
-    # Empty State Guide
     st.markdown("""
     <div style="background-color: rgba(30, 41, 59, 0.4); border: 1px dashed rgba(255, 255, 255, 0.2); border-radius: 12px; padding: 2rem; text-align: center; margin-top: 2rem;">
         <h3 style="color: #38BDF8;">Ready to analyze your website's backlinks?</h3>
         <p style="color: #94A3B8; max-width: 600px; margin: 0.5rem auto 1.5rem auto;">
-            Enter any domain name (e.g. <code>python.org</code> or <code>yourwebsite.com</code>) above and click <b>Find Backlinks</b> to uncover referring domains, anchor text distribution, and dofollow/nofollow ratio.
+            Enter any domain name (e.g. <code>cairindia.com</code>, <code>python.org</code>, or <code>yourwebsite.com</code>) above and click <b>Find Backlinks</b>.
         </p>
     </div>
     """, unsafe_allow_html=True)

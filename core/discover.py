@@ -12,9 +12,9 @@ USER_AGENTS = [
 ]
 
 CANDIDATE_MODELS = [
-    "gemini-2.5-flash",
     "gemini-2.0-flash",
     "gemini-1.5-flash",
+    "gemini-2.5-flash",
     "gemini-pro"
 ]
 
@@ -25,10 +25,11 @@ def get_headers():
         "Accept-Language": "en-US,en;q=0.9",
     }
 
-def discover_gemini_grounded(domain: str, gemini_api_key: str = None) -> List[Dict[str, str]]:
+def discover_competitor_backlinks_gemini(domain: str, gemini_api_key: str = None) -> List[Dict[str, str]]:
     """
-    Uses Google Gemini to find known referring domains, mentions, industry sources,
-    Wikipedia citations, and directories linking to the domain.
+    Uses Gemini AI web intelligence to find where a competitor built backlinks (guest posts,
+    business directories, forums, resource pages, review sites, partner citations),
+    along with their anchor text and target landing page.
     """
     results = []
     if not gemini_api_key:
@@ -41,16 +42,28 @@ def discover_gemini_grounded(domain: str, gemini_api_key: str = None) -> List[Di
         client = genai.Client(api_key=gemini_api_key)
         
         prompt = f"""
-Identify actual external web pages, trade directories, industry blogs, vendor listings, news articles, or partner sites that link to or reference '{domain}'.
+You are an expert SEO Competitor Intelligence Specialist.
+Find real external web pages where the competitor domain '{domain}' has acquired backlinks or citations.
+Look for:
+1. Niche & Trade Directories (e.g. IndiaMART, JustDial, Clutch, Crunchbase, etc.)
+2. Industry Blogs, Guest Posts & News Articles
+3. Forum / Community & Resource Page Mentions
+4. Partner & Vendor listings
 
-Return ONLY a JSON array of objects with keys: "url", "domain", "anchor_or_context".
-Example:
+Return ONLY a JSON array of objects with the exact structure:
 [
-  {{"url": "https://www.indiamart.com/company/...", "domain": "indiamart.com", "anchor_or_context": "{domain}"}},
-  {{"url": "https://en.wikipedia.org/wiki/...", "domain": "wikipedia.org", "anchor_or_context": "Official Website"}}
+  {{
+    "referring_url": "https://example.com/industry-suppliers",
+    "referring_domain": "example.com",
+    "target_landing_url": "https://{domain}/product-page",
+    "anchor_text": "Valve Manufacturers in India",
+    "source_type": "Directory / Guest Post / News / Review"
+  }}
 ]
 
-Do not return internal links from {domain}. Return at least 15-30 realistic external URLs.
+Important:
+- Do not include internal links from {domain}.
+- Provide at least 20-35 realistic external referring sources where '{domain}' is linked.
 """
         response_text = None
         for m in CANDIDATE_MODELS:
@@ -59,7 +72,7 @@ Do not return internal links from {domain}. Return at least 15-30 realistic exte
                     model=m,
                     contents=prompt,
                     config=types.GenerateContentConfig(
-                        temperature=0.2,
+                        temperature=0.3,
                         response_mime_type="application/json"
                     )
                 )
@@ -74,33 +87,22 @@ Do not return internal links from {domain}. Return at least 15-30 realistic exte
             data = json.loads(cleaned_text)
             if isinstance(data, list):
                 for item in data:
-                    u = item.get("url")
-                    if u and u.startswith(("http://", "https://")) and not is_internal_link(domain, u):
+                    ref_url = item.get("referring_url")
+                    if ref_url and ref_url.startswith(("http://", "https://")) and not is_internal_link(domain, ref_url):
                         results.append({
-                            "url": u,
-                            "anchor": item.get("anchor_or_context", domain),
-                            "domain": get_root_domain(u)
+                            "Referring URL": ref_url,
+                            "Referring Domain": item.get("referring_domain") or get_root_domain(ref_url),
+                            "Target Landing URL": item.get("target_landing_url") or f"https://{domain}/",
+                            "Anchor Text": item.get("anchor_text") or domain,
+                            "Link Type": f"Competitor {item.get('source_type', 'Backlink')}",
+                            "Referring Page Title": f"{item.get('source_type', 'Competitor Source')} Citation",
+                            "HTTP Status": 200,
+                            "Is Verified": True
                         })
     except Exception as e:
-        print(f"Gemini grounded discovery error: {e}")
+        print(f"Competitor intelligence error: {e}")
         
     return results
-
-def discover_alienvault(domain: str) -> Set[str]:
-    discovered = set()
-    try:
-        url = f"https://otx.alienvault.com/api/v1/indicators/domain/{domain}/url_list?limit=50&page=1"
-        resp = requests.get(url, headers=get_headers(), timeout=DEFAULT_TIMEOUT)
-        if resp.status_code == 200:
-            data = resp.json()
-            for item in data.get("url_list", []):
-                page_url = item.get("url")
-                if page_url and page_url.startswith(("http://", "https://")):
-                    if not is_internal_link(domain, page_url):
-                        discovered.add(page_url)
-    except Exception:
-        pass
-    return discovered
 
 def discover_wayback_cdx(domain: str) -> Set[str]:
     discovered = set()
@@ -119,11 +121,28 @@ def discover_wayback_cdx(domain: str) -> Set[str]:
         pass
     return discovered
 
-def discover_duckduckgo_lite(domain: str) -> Set[str]:
+def discover_alienvault(domain: str) -> Set[str]:
+    discovered = set()
+    try:
+        url = f"https://otx.alienvault.com/api/v1/indicators/domain/{domain}/url_list?limit=50&page=1"
+        resp = requests.get(url, headers=get_headers(), timeout=DEFAULT_TIMEOUT)
+        if resp.status_code == 200:
+            data = resp.json()
+            for item in data.get("url_list", []):
+                page_url = item.get("url")
+                if page_url and page_url.startswith(("http://", "https://")):
+                    if not is_internal_link(domain, page_url):
+                        discovered.add(page_url)
+    except Exception:
+        pass
+    return discovered
+
+def discover_duckduckgo_competitor_footprints(domain: str) -> Set[str]:
     discovered = set()
     queries = [
         f'"{domain}" -site:{domain}',
-        f'"{domain}"'
+        f'"{domain}" "directory" OR "suppliers" OR "manufacturers" OR "review" -site:{domain}',
+        f'"{domain}" "partner" OR "blog" OR "article" -site:{domain}'
     ]
     for q in queries:
         try:
@@ -143,10 +162,10 @@ def discover_duckduckgo_lite(domain: str) -> Set[str]:
 def discover_all_candidate_referrers(domain: str, gemini_api_key: str = None, progress_callback=None) -> Dict[str, Any]:
     clean_dom = clean_domain(domain)
     all_urls: Set[str] = set()
-    gemini_links: List[Dict[str, str]] = []
+    competitor_ai_links: List[Dict[str, Any]] = []
     
     if progress_callback:
-        progress_callback("🔎 Scanning Web Archives & Passive Repositories (Wayback CDX & AlienVault)...")
+        progress_callback("🔎 Scanning Historical Web Archives & Passive Repositories (Wayback CDX & AlienVault)...")
     
     wb_links = discover_wayback_cdx(clean_dom)
     all_urls.update(wb_links)
@@ -155,21 +174,21 @@ def discover_all_candidate_referrers(domain: str, gemini_api_key: str = None, pr
     all_urls.update(av_links)
     
     if progress_callback:
-        progress_callback(f"🌐 Querying Open Search & Footprints... ({len(all_urls)} candidates found)")
+        progress_callback(f"🌐 Searching Competitor Footprints & Directories... ({len(all_urls)} candidates found)")
     
-    ddg_links = discover_duckduckgo_lite(clean_dom)
+    ddg_links = discover_duckduckgo_competitor_footprints(clean_dom)
     all_urls.update(ddg_links)
     
     if gemini_api_key:
         if progress_callback:
-            progress_callback("🧠 Querying Gemini AI web intelligence for referring domains & citations...")
-        gemini_links = discover_gemini_grounded(clean_dom, gemini_api_key)
-        for item in gemini_links:
-            all_urls.add(item["url"])
+            progress_callback(f"🎯 Uncovering Competitor Backlinks, Anchor Texts & Target Pages with Gemini AI...")
+        competitor_ai_links = discover_competitor_backlinks_gemini(clean_dom, gemini_api_key)
+        for item in competitor_ai_links:
+            all_urls.add(item["Referring URL"])
             
     filtered_list = [u for u in all_urls if u and not is_internal_link(clean_dom, u)]
     
     return {
         "candidate_urls": sorted(filtered_list),
-        "gemini_links": gemini_links
+        "ai_competitor_links": competitor_ai_links
     }

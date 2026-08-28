@@ -11,6 +11,13 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
 ]
 
+CANDIDATE_MODELS = [
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+    "gemini-pro"
+]
+
 def get_headers():
     return {
         "User-Agent": USER_AGENTS[0],
@@ -20,8 +27,8 @@ def get_headers():
 
 def discover_gemini_grounded(domain: str, gemini_api_key: str = None) -> List[Dict[str, str]]:
     """
-    Uses Google Gemini (with its knowledge base & web awareness) to find known referring domains,
-    mentions, news sources, directory listings, and Wikipedia/citations linking to the domain.
+    Uses Google Gemini to find known referring domains, mentions, industry sources,
+    Wikipedia citations, and directories linking to the domain.
     """
     results = []
     if not gemini_api_key:
@@ -34,28 +41,36 @@ def discover_gemini_grounded(domain: str, gemini_api_key: str = None) -> List[Di
         client = genai.Client(api_key=gemini_api_key)
         
         prompt = f"""
-Find as many real, external web pages, news articles, directories, industry blogs, Wikipedia pages, or partner websites that mention or contain backlinks to the domain '{domain}'.
+Identify actual external web pages, trade directories, industry blogs, vendor listings, news articles, or partner sites that link to or reference '{domain}'.
 
 Return ONLY a JSON array of objects with keys: "url", "domain", "anchor_or_context".
-Example output format:
+Example:
 [
-  {{"url": "https://en.wikipedia.org/wiki/...", "domain": "wikipedia.org", "anchor_or_context": "Cairn India"}},
-  {{"url": "https://www.reuters.com/article/...", "domain": "reuters.com", "anchor_or_context": "cairindia.com"}}
+  {{"url": "https://www.indiamart.com/company/...", "domain": "indiamart.com", "anchor_or_context": "{domain}"}},
+  {{"url": "https://en.wikipedia.org/wiki/...", "domain": "wikipedia.org", "anchor_or_context": "Official Website"}}
 ]
 
-Do not include internal links from {domain}. Return at least 15-25 valid external URLs.
+Do not return internal links from {domain}. Return at least 15-30 realistic external URLs.
 """
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.2,
-                response_mime_type="application/json"
-            )
-        )
-        
-        if response.text:
-            cleaned_text = response.text.strip()
+        response_text = None
+        for m in CANDIDATE_MODELS:
+            try:
+                resp = client.models.generate_content(
+                    model=m,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        temperature=0.2,
+                        response_mime_type="application/json"
+                    )
+                )
+                if resp and resp.text:
+                    response_text = resp.text
+                    break
+            except Exception:
+                continue
+                
+        if response_text:
+            cleaned_text = response_text.strip()
             data = json.loads(cleaned_text)
             if isinstance(data, list):
                 for item in data:
@@ -72,9 +87,6 @@ Do not include internal links from {domain}. Return at least 15-25 valid externa
     return results
 
 def discover_alienvault(domain: str) -> Set[str]:
-    """
-    Queries AlienVault OTX Passive URL intelligence endpoint.
-    """
     discovered = set()
     try:
         url = f"https://otx.alienvault.com/api/v1/indicators/domain/{domain}/url_list?limit=50&page=1"
@@ -86,14 +98,11 @@ def discover_alienvault(domain: str) -> Set[str]:
                 if page_url and page_url.startswith(("http://", "https://")):
                     if not is_internal_link(domain, page_url):
                         discovered.add(page_url)
-    except Exception as e:
+    except Exception:
         pass
     return discovered
 
 def discover_wayback_cdx(domain: str) -> Set[str]:
-    """
-    Queries Wayback Machine CDX API to find external pages that archived links to the domain.
-    """
     discovered = set()
     try:
         url = f"https://web.archive.org/cdx/search/cdx?url=*{domain}*&output=json&limit=60"
@@ -101,20 +110,16 @@ def discover_wayback_cdx(domain: str) -> Set[str]:
         if resp.status_code == 200:
             data = resp.json()
             if len(data) > 1:
-                # data[0] is header: ["urlkey", "timestamp", "original", ...]
                 for row in data[1:]:
                     if len(row) > 2:
                         orig = row[2]
                         if orig.startswith(("http://", "https://")) and not is_internal_link(domain, orig):
                             discovered.add(orig)
-    except Exception as e:
+    except Exception:
         pass
     return discovered
 
 def discover_duckduckgo_lite(domain: str) -> Set[str]:
-    """
-    Scrapes DuckDuckGo Lite for mentions and referring links.
-    """
     discovered = set()
     queries = [
         f'"{domain}" -site:{domain}',
@@ -122,10 +127,9 @@ def discover_duckduckgo_lite(domain: str) -> Set[str]:
     ]
     for q in queries:
         try:
-            url = f"https://lite.duckduckgo.com/lite/"
+            url = "https://lite.duckduckgo.com/lite/"
             resp = requests.post(url, data={"q": q}, headers=get_headers(), timeout=DEFAULT_TIMEOUT)
             if resp.status_code == 200:
-                # Find all external links in result snippets
                 urls = re.findall(r'class=[\"\']result-link[\"\']\s+href=[\"\'](https?://[^\"\']+)[\"\']', resp.text)
                 if not urls:
                     urls = re.findall(r'href=[\"\'](https?://[^\"\'\s>]+)[\"\']', resp.text)
@@ -136,29 +140,7 @@ def discover_duckduckgo_lite(domain: str) -> Set[str]:
             continue
     return discovered
 
-def discover_hackertarget(domain: str) -> Set[str]:
-    """
-    Queries HackerTarget hostsearch / backlink public endpoints.
-    """
-    discovered = set()
-    try:
-        url = f"https://api.hackertarget.com/hostsearch/?q={domain}"
-        resp = requests.get(url, headers=get_headers(), timeout=DEFAULT_TIMEOUT)
-        if resp.status_code == 200 and "error" not in resp.text.lower():
-            for line in resp.text.splitlines():
-                parts = line.split(",")
-                if parts and parts[0]:
-                    host = parts[0].strip()
-                    if not is_internal_link(domain, host):
-                        discovered.add(f"https://{host}")
-    except Exception:
-        pass
-    return discovered
-
 def discover_all_candidate_referrers(domain: str, gemini_api_key: str = None, progress_callback=None) -> Dict[str, Any]:
-    """
-    Runs multi-source discovery engines and aggregates unique candidate referring URLs and AI discovered links.
-    """
     clean_dom = clean_domain(domain)
     all_urls: Set[str] = set()
     gemini_links: List[Dict[str, str]] = []
@@ -178,13 +160,9 @@ def discover_all_candidate_referrers(domain: str, gemini_api_key: str = None, pr
     ddg_links = discover_duckduckgo_lite(clean_dom)
     all_urls.update(ddg_links)
     
-    ht_links = discover_hackertarget(clean_dom)
-    all_urls.update(ht_links)
-    
-    # If Gemini API key is available, use Gemini's Google Search & Knowledge Base for high quality referring pages
     if gemini_api_key:
         if progress_callback:
-            progress_callback("🧠 Using Gemini AI to discover high-authority referring domains & citations...")
+            progress_callback("🧠 Querying Gemini AI web intelligence for referring domains & citations...")
         gemini_links = discover_gemini_grounded(clean_dom, gemini_api_key)
         for item in gemini_links:
             all_urls.add(item["url"])
